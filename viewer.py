@@ -20,9 +20,21 @@ def generate_viewer(
     total_vids = len(videos)
     total_hype = len(hypocrisy)
 
-    items_json = json.dumps(items,     ensure_ascii=False)
-    hype_json  = json.dumps(hypocrisy, ensure_ascii=False)
-    vids_json  = json.dumps(videos,    ensure_ascii=False)
+    # items_json = json.dumps(items,     ensure_ascii=False)
+    # hype_json  = json.dumps(hypocrisy, ensure_ascii=False)
+    # vids_json  = json.dumps(videos,    ensure_ascii=False)
+
+  def _safe_json(data):
+    return (
+        json.dumps(data, ensure_ascii=True)
+        .replace('</script>', r'<\/script>')
+        .replace('`', r'\u0060')
+        .replace('$', r'\u0024')
+    )
+
+items_json = _safe_json(items)
+hype_json  = _safe_json(hypocrisy)
+vids_json  = _safe_json(videos)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
