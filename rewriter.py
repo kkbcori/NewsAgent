@@ -5,11 +5,16 @@ Groq free tier: 14,400 requests/day, 30 requests/minute
 Model: llama-3.3-70b-versatile — comparable to Claude Sonnet quality
 Sign up free at: https://console.groq.com
 
+Rate limit fix: 2 second delay between calls = max 30 calls/min (safe)
+Format: Only generates "rewrite" by default to stay within free tier limits.
+        Set GENERATE_ALL_FORMATS=true in env to generate all 4 formats.
+
 Tone: Centrist, factual, neutral — no ideological bias left or right.
 """
 
 import json
 import os
+import time
 import logging
 from groq import Groq
 from dotenv import load_dotenv
@@ -19,6 +24,12 @@ logger = logging.getLogger(__name__)
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 MODEL  = "llama-3.3-70b-versatile"
+
+# Set to True in .env to generate all 4 formats (uses 4x more API calls)
+GENERATE_ALL = os.getenv("GENERATE_ALL_FORMATS", "false").lower() == "true"
+
+# Delay between API calls to stay under 30 req/min rate limit
+API_DELAY = 2.0  # seconds
 
 # ── System prompt — neutral, fact-first ───────────────────────────────────────
 SYSTEM = (
@@ -166,6 +177,8 @@ Headlines:
 
 # ── Core generation helper ────────────────────────────────────────────────────
 def _call_groq(prompt: str, max_tokens: int = 600) -> str:
+    """Call Groq API with a delay to respect the 30 req/min rate limit."""
+    time.sleep(API_DELAY)
     resp = client.chat.completions.create(
         model=MODEL,
         max_tokens=max_tokens,
@@ -187,14 +200,21 @@ def _parse_json(raw: str):
 
 # ── Public functions ──────────────────────────────────────────────────────────
 def generate_all_formats(title: str, summary: str, category: str) -> dict:
-    """Generate all 4 tweet formats for a single news item."""
+    """
+    Generate tweet formats for a single news item.
+    Default: only 'rewrite' (1 API call per item — safe for free tier).
+    Set GENERATE_ALL_FORMATS=true in env to generate all 4 formats.
+    """
     tone_raw = CATEGORY_TONE.get(category, "")
     tone     = f"\nContext: {tone_raw}" if tone_raw else ""
-    results  = {}
+    results  = {fmt: None for fmt in PROMPTS}
 
-    for fmt, tmpl in PROMPTS.items():
+    # Decide which formats to generate
+    active_formats = list(PROMPTS.keys()) if GENERATE_ALL else ["rewrite"]
+
+    for fmt in active_formats:
         try:
-            prompt = tmpl.format(tone=tone, title=title, summary=summary[:500])
+            prompt = PROMPTS[fmt].format(tone=tone, title=title, summary=summary[:500])
             raw    = _call_groq(prompt)
 
             if fmt in ("thread", "poll"):
