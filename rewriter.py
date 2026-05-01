@@ -1,35 +1,35 @@
 """
-rewriter.py — Tweet generator using Groq API (FREE).
+rewriter.py — Tweet generator using Ollama (local LLM, 100% free).
 
-Groq free tier: 14,400 requests/day, 30 requests/minute
-Model: llama-3.3-70b-versatile — comparable to Claude Sonnet quality
-Sign up free at: https://console.groq.com
+On GitHub Actions: Ollama runs locally on the runner with qwen2.5:3b
+On local PC: Install Ollama from https://ollama.com, then run:
+    ollama pull qwen2.5:3b
 
-Rate limit fix: 2 second delay between calls = max 30 calls/min (safe)
-Format: Only generates "rewrite" by default to stay within free tier limits.
-        Set GENERATE_ALL_FORMATS=true in env to generate all 4 formats.
+Model: qwen2.5:3b (~2GB RAM, excellent at JSON structured output)
+Fallback: If Ollama is not available, falls back to Groq API (if key set)
 
 Tone: Centrist, factual, neutral — no ideological bias left or right.
+All 4 formats generated: Rewrite, Hot Take, Thread, Poll
 """
 
 import json
 import os
 import time
 import logging
-from groq import Groq
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL  = "llama-3.3-70b-versatile"
+# ── LLM backend config ────────────────────────────────────────────────────────
+OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL   = "llama-3.3-70b-versatile"
 
-# Set to True in .env to generate all 4 formats (uses 4x more API calls)
-GENERATE_ALL = os.getenv("GENERATE_ALL_FORMATS", "false").lower() == "true"
-
-# Delay between API calls to stay under 30 req/min rate limit
-API_DELAY = 2.0  # seconds
+# Detect which backend to use
+USE_OLLAMA = True  # always try Ollama first
 
 # ── System prompt — neutral, fact-first ───────────────────────────────────────
 SYSTEM = (
@@ -45,42 +45,39 @@ SYSTEM = (
 # ── Category context ──────────────────────────────────────────────────────────
 CATEGORY_TONE = {
     "usa": (
-        "This is US news. Write for an international audience interested in US affairs. "
+        "This is US news. Write for an international audience. "
         "Do not assume the reader supports any US political party or ideology."
     ),
     "world": (
-        "This is international news covering Europe, Australia, or global affairs. "
-        "Write factually for a global audience. No geopolitical bias."
+        "This is international news. Write factually for a global audience. "
+        "No geopolitical bias."
     ),
     "india": (
         "This is Indian news. Write factually for a general Indian audience. "
-        "Do not favour or criticise any Indian political party, government, or opposition."
+        "Do not favour or criticise any Indian political party."
     ),
     "telugu": (
-        "This is Telugu/AP/Telangana regional news. "
-        "Write factually for a Telugu-speaking audience. "
+        "This is Telugu/AP/Telangana regional news. Write factually. "
         "Do not favour TDP, YSRCP, BRS, or any other regional party."
     ),
     "telugu_film": (
         "This is Tollywood / Telugu cinema news. "
-        "Be enthusiastic and fan-friendly. Stick to facts about films, actors, and releases."
+        "Be enthusiastic and fan-friendly. Stick to facts."
     ),
 }
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 PROMPTS = {
     "rewrite": """\
-Rewrite this news as a clear, factual tweet. Report what happened — do not add opinions or framing.
+Rewrite this news as a clear, factual tweet.
 {tone}
 
 Rules:
-- Max 260 characters
-- Do NOT copy the original headline verbatim — rephrase it
-- Stick strictly to the facts in the story
-- No political opinions or ideological framing
-- Max 1-2 hashtags only if they add genuine value
-- No em-dashes. Write naturally.
-- Return ONLY the tweet text. No quotes, no preamble, no explanation.
+- Max 260 characters total
+- Do NOT copy the headline verbatim — rephrase it
+- Stick to facts only, no opinions or framing
+- Max 2 hashtags only if genuinely valuable
+- Return ONLY the tweet text. Nothing else.
 
 Title: {title}
 Summary: {summary}""",
@@ -90,44 +87,44 @@ Write a thought-provoking tweet about this news based strictly on facts and logi
 {tone}
 
 Rules:
-- Max 260 characters
-- The observation must be grounded in facts from THIS story — not in political ideology
-- Makes people think "I hadn't considered that angle" — not "I agree with that side"
-- Do NOT favour or attack any political party, government, or movement
-- 0-1 hashtags
-- Do NOT start with "Hot take:"
-- Return ONLY the tweet text. No quotes, no preamble, no explanation.
+- Max 260 characters total
+- Must be grounded in facts from THIS story only — not ideology
+- Makes people think "I hadn't considered that" — not "I agree with that side"
+- Do NOT favour or attack any political party or movement
+- Return ONLY the tweet text. Nothing else.
 
 Title: {title}
 Summary: {summary}""",
 
     "thread": """\
-Write a 3-5 tweet THREAD that explains this news story clearly and factually.
+Write a 3-5 tweet thread explaining this news clearly and factually.
 {tone}
 
 Rules:
 - Each tweet max 260 characters
 - Tweet 1: factual hook — what happened
-- Middle tweets: key facts, context, background, numbers
-- Last tweet: neutral question or factual implication for the reader
-- Present ALL sides of the story fairly
-- Return ONLY a JSON array of strings like: ["tweet1", "tweet2", "tweet3"]
-- No markdown. No explanation. Just valid JSON array.
+- Middle tweets: key facts, context, numbers
+- Last tweet: neutral question or implication for reader
+- Present ALL sides fairly
+- Return ONLY a valid JSON array of strings, example:
+  ["tweet one here", "tweet two here", "tweet three here"]
+- No markdown, no explanation, just the JSON array.
 
 Title: {title}
 Summary: {summary}""",
 
     "poll": """\
-Write a neutral, fact-based tweet + poll about this news.
+Write a neutral tweet + poll about this news.
 {tone}
 
 Rules:
-- Tweet: max 200 chars, ends with a genuinely open question
-- The question must be neutral — not leading toward any answer
+- Tweet: max 200 chars, ends with an open question
+- Question must be neutral — not leading toward any answer
 - Exactly 4 poll options, each max 25 characters
-- Options must represent genuinely different viewpoints — balanced, not stacked
-- Return ONLY valid JSON like: {{"tweet": "...", "options": ["A", "B", "C", "D"]}}
-- No markdown. No explanation. Just valid JSON.
+- Options represent genuinely different viewpoints
+- Return ONLY valid JSON, exactly like this:
+  {{"tweet": "your tweet here", "options": ["Option A", "Option B", "Option C", "Option D"]}}
+- No markdown, no explanation, just the JSON object.
 
 Title: {title}
 Summary: {summary}""",
@@ -138,49 +135,67 @@ Write factual tweet content for this YouTube video.
 {tone}
 
 Rules:
-- Rewrite: max 260 chars, factual, include the YouTube link placeholder [LINK]
-- Hot take: a factual observation about the video's topic — not a partisan opinion
-- Return ONLY valid JSON: {{"rewrite": "...", "hot_take": "..."}}
-- No markdown. No explanation. Just valid JSON.
+- Rewrite: max 260 chars, factual, include the placeholder text [LINK] for the URL
+- Hot take: factual observation about the topic, max 260 chars, no partisan opinion
+- Return ONLY valid JSON exactly like this:
+  {{"rewrite": "tweet with [LINK]", "hot_take": "observation here"}}
+- No markdown, no explanation, just the JSON.
 
 Channel: {channel}
 Video title: {title}
 Description: {description}"""
 
 HYPOCRISY_PROMPT = """\
-You are a sharp, logical analyst who identifies genuine contradictions, double standards, \
-and hypocrisy in the news — applied EQUALLY to all political parties, governments, \
-corporations, celebrities, and movements regardless of ideology.
+You are a logical analyst identifying genuine contradictions and double standards in news.
+Apply equally to ALL sides — left, right, government, opposition, any party or ideology.
 
-Read ALL headlines below. Then:
-1. Pick 6-10 items that show a clear, provable logical contradiction or double standard.
-   - Must be based on VERIFIABLE FACTS from the headlines — not on ideology
-   - Apply equally to left AND right, government AND opposition, rich AND poor
-   - A person/institution saying one thing and doing another = valid
-   - Two stories that directly contradict each other = valid
-   - Pure partisan opinion = NOT valid
+Headlines below. Pick 5-8 items showing clear, provable logical contradictions:
+- Person/institution saying one thing, doing another = valid
+- Two stories directly contradicting each other = valid
+- Partisan opinion without factual basis = NOT valid
 
-2. For each, write ONE sharp, logical tweet (max 260 chars):
-   - Point out the factual contradiction clearly
-   - Tone: dry wit, logical — not angry, not partisan
-   - 0-1 hashtags
-   - Do NOT start with "Oh the irony", "Hypocrisy alert:", "Hot take:"
+For each write ONE sharp tweet (max 260 chars):
+- Dry wit, logical tone — not angry, not partisan
+- No hashtags needed
+- Do NOT start with "Oh the irony", "Hypocrisy alert:", "Hot take:"
 
-Return ONLY a JSON array. Each element:
-{{"tweet":"...","based_on":"...","category":"usa|world|india|telugu|telugu_film"}}
+Return ONLY a valid JSON array, each element exactly like:
+{{"tweet":"tweet text","based_on":"headline(s)","category":"usa|world|india|telugu|telugu_film"}}
 
-No markdown. No explanation. Just valid JSON array.
+No markdown, no explanation, just the JSON array.
 
 Headlines:
 {headlines}"""
 
 
-# ── Core generation helper ────────────────────────────────────────────────────
+# ── Backend calls ─────────────────────────────────────────────────────────────
+
+def _call_ollama(prompt: str, max_tokens: int = 600) -> str:
+    """Call local Ollama instance."""
+    resp = requests.post(
+        f"{OLLAMA_URL}/api/chat",
+        json={
+            "model":   OLLAMA_MODEL,
+            "stream":  False,
+            "options": {"num_predict": max_tokens, "temperature": 0.7},
+            "messages": [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user",   "content": prompt},
+            ],
+        },
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.json()["message"]["content"].strip()
+
+
 def _call_groq(prompt: str, max_tokens: int = 600) -> str:
-    """Call Groq API with a delay to respect the 30 req/min rate limit."""
-    time.sleep(API_DELAY)
+    """Fallback to Groq API if Ollama not available."""
+    from groq import Groq
+    time.sleep(2)  # respect 30 req/min limit
+    client = Groq(api_key=GROQ_API_KEY)
     resp = client.chat.completions.create(
-        model=MODEL,
+        model=GROQ_MODEL,
         max_tokens=max_tokens,
         messages=[
             {"role": "system", "content": SYSTEM},
@@ -191,42 +206,76 @@ def _call_groq(prompt: str, max_tokens: int = 600) -> str:
     return resp.choices[0].message.content.strip()
 
 
+def _call_llm(prompt: str, max_tokens: int = 600) -> str:
+    """Call Ollama first, fall back to Groq if Ollama unavailable."""
+    try:
+        return _call_ollama(prompt, max_tokens)
+    except Exception as e:
+        if GROQ_API_KEY and len(GROQ_API_KEY) > 10:
+            logger.warning(f"Ollama failed ({e}), falling back to Groq...")
+            return _call_groq(prompt, max_tokens)
+        raise RuntimeError(
+            f"Ollama unavailable ({e}) and no GROQ_API_KEY set. "
+            "Install Ollama locally or set GROQ_API_KEY."
+        )
+
+
 def _parse_json(raw: str):
-    raw = raw.strip().strip("`").strip()
+    """Safely parse JSON from LLM output, stripping any markdown fences."""
+    raw = raw.strip()
+    # Strip markdown code fences
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    raw = raw.strip()
     if raw.lower().startswith("json"):
         raw = raw[4:].strip()
     return json.loads(raw)
 
 
 # ── Public functions ──────────────────────────────────────────────────────────
+
+def check_ollama() -> bool:
+    """Check if Ollama is running and model is available."""
+    try:
+        resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+        models = [m["name"] for m in resp.json().get("models", [])]
+        available = any(OLLAMA_MODEL.split(":")[0] in m for m in models)
+        if available:
+            logger.info(f"Ollama ready with model: {OLLAMA_MODEL}")
+        else:
+            logger.warning(f"Ollama running but {OLLAMA_MODEL} not found. Models: {models}")
+        return available
+    except Exception as e:
+        logger.warning(f"Ollama not available: {e}")
+        return False
+
+
 def generate_all_formats(title: str, summary: str, category: str) -> dict:
-    """
-    Generate tweet formats for a single news item.
-    Default: only 'rewrite' (1 API call per item — safe for free tier).
-    Set GENERATE_ALL_FORMATS=true in env to generate all 4 formats.
-    """
+    """Generate all 4 tweet formats for a single news item."""
     tone_raw = CATEGORY_TONE.get(category, "")
     tone     = f"\nContext: {tone_raw}" if tone_raw else ""
     results  = {fmt: None for fmt in PROMPTS}
 
-    # Decide which formats to generate
-    active_formats = list(PROMPTS.keys()) if GENERATE_ALL else ["rewrite"]
-
-    for fmt in active_formats:
+    for fmt, tmpl in PROMPTS.items():
         try:
-            prompt = PROMPTS[fmt].format(tone=tone, title=title, summary=summary[:500])
-            raw    = _call_groq(prompt)
+            prompt = tmpl.format(tone=tone, title=title, summary=summary[:500])
+            raw    = _call_llm(prompt)
 
             if fmt in ("thread", "poll"):
                 parsed = _parse_json(raw)
-                if fmt == "thread" and not isinstance(parsed, list):
-                    raise ValueError("Expected list for thread")
-                if fmt == "poll" and (
-                    "tweet" not in parsed or len(parsed.get("options", [])) != 4
-                ):
-                    raise ValueError("Invalid poll structure")
+                if fmt == "thread":
+                    if not isinstance(parsed, list):
+                        raise ValueError("Expected JSON array for thread")
+                    # Ensure all items are strings
+                    parsed = [str(t) for t in parsed]
+                if fmt == "poll":
+                    if "tweet" not in parsed or len(parsed.get("options", [])) != 4:
+                        raise ValueError("Invalid poll: need tweet + 4 options")
                 results[fmt] = parsed
             else:
+                # Clean up plain text — remove surrounding quotes if model added them
+                raw = raw.strip('"').strip("'").strip()
                 results[fmt] = raw
 
             logger.info(f"    ✓ {fmt}")
@@ -243,17 +292,16 @@ def generate_video_tweet(
     """Generate Rewrite + Hot Take for a YouTube video."""
     tone_raw = CATEGORY_TONE.get(category, "")
     tone     = f"\nContext: {tone_raw}" if tone_raw else ""
-
-    prompt = VIDEO_PROMPT.format(
+    prompt   = VIDEO_PROMPT.format(
         tone=tone, channel=channel,
         title=title, description=description[:300],
     )
     try:
-        raw  = _call_groq(prompt, max_tokens=300)
+        raw  = _call_llm(prompt, max_tokens=300)
         data = _parse_json(raw)
         for key in ("rewrite", "hot_take"):
             if key in data and data[key]:
-                data[key] = data[key].replace("[LINK]", video_url)
+                data[key] = str(data[key]).replace("[LINK]", video_url)
         return data
     except Exception as e:
         logger.warning(f"    ✗ video tweet ({title[:40]}): {e}")
@@ -269,11 +317,11 @@ def generate_hypocrisy_tweets(all_items: list[dict]) -> list[dict]:
         for i in all_items
     )
     try:
-        prompt  = HYPOCRISY_PROMPT.format(headlines=headlines[:12000])
-        raw     = _call_groq(prompt, max_tokens=2000)
+        prompt  = HYPOCRISY_PROMPT.format(headlines=headlines[:10000])
+        raw     = _call_llm(prompt, max_tokens=2000)
         results = _parse_json(raw)
         if not isinstance(results, list):
-            raise ValueError("Expected list")
+            raise ValueError("Expected JSON array")
         logger.info(f"[HYPOCRISY] Generated {len(results)} tweets.")
         return results
     except Exception as e:

@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       max_items:
-        description: 'Max items per RSS source (default 5)'
+        description: 'Max items per RSS source (default 3)'
         required: false
-        default: '5'
+        default: '3'
       category:
         description: 'Filter: usa | world | india | telugu | telugu_film (blank = all)'
         required: false
@@ -21,7 +21,7 @@ on:
       skip_youtube:
         description: 'Skip YouTube videos? (true/false)'
         required: false
-        default: 'false'
+        default: 'true'
 
 jobs:
   generate:
@@ -31,29 +31,64 @@ jobs:
       contents: write
 
     steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
+      # ── 2. Python ──────────────────────────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      # ── 3. Install Ollama ──────────────────────────────────────────────────
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          echo "Ollama installed"
+
+      # ── 4. Cache the model (avoids re-downloading 2GB every run) ──────────
+      - name: Cache Ollama model
+        uses: actions/cache@v4
+        id: model-cache
+        with:
+          path: ~/.ollama/models
+          key: ollama-qwen2.5-3b-v1
+
+      # ── 5. Pull model (skipped if cache hit) ──────────────────────────────
+      - name: Pull Ollama model
+        run: |
+          ollama serve &
+          sleep 5
+          if [ "${{ steps.model-cache.outputs.cache-hit }}" != "true" ]; then
+            echo "Downloading qwen2.5:3b model (~2GB, one-time)..."
+            ollama pull qwen2.5:3b
+          else
+            echo "Model loaded from cache."
+            ollama pull qwen2.5:3b 2>/dev/null || true
+          fi
+          echo "Model ready."
+        env:
+          OLLAMA_MODELS: ~/.ollama/models
+
+      # ── 6. Run NewsAgent ───────────────────────────────────────────────────
       - name: Run NewsAgent
         env:
-          GROQ_API_KEY:    ${{ secrets.GROQ_API_KEY }}
-          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          GROQ_API_KEY:    ${{ secrets.GROQ_API_KEY }}    # fallback if Ollama fails
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }} # optional
+          OLLAMA_URL:      "http://localhost:11434"
+          OLLAMA_MODEL:    "qwen2.5:3b"
         run: |
-          MAX="${{ github.event.inputs.max_items   || '5' }}"
+          MAX="${{ github.event.inputs.max_items   || '3' }}"
           CAT="${{ github.event.inputs.category    || '' }}"
           SKIP_H="${{ github.event.inputs.skip_hypocrisy || 'false' }}"
-          SKIP_Y="${{ github.event.inputs.skip_youtube   || 'false' }}"
+          SKIP_Y="${{ github.event.inputs.skip_youtube   || 'true' }}"
 
           CMD="python run.py --no-browser --max $MAX"
           [ -n "$CAT"          ] && CMD="$CMD --category $CAT"
@@ -63,6 +98,7 @@ jobs:
           echo "Running: $CMD"
           $CMD
 
+      # ── 7. Commit viewer to repo ───────────────────────────────────────────
       - name: Commit & push viewer
         run: |
           git config user.name  "NewsAgent Bot"
@@ -72,6 +108,6 @@ jobs:
             echo "No changes to commit."
           else
             git commit -m "🗞️ $(date -u '+%Y-%m-%d %H:%M UTC')"
-            git pull --rebase origin main || git pull --rebase origin master
+            git pull --rebase origin master || git pull --rebase origin main
             git push
           fi
