@@ -25,10 +25,12 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # Gemma 2 9B has 15,000 TPM (2.5x more than other Groq models at 6,000 TPM)
-# llama-3.1-8b-instant has 14,400 RPD (most generous daily quota)
-# We use gemma2 for batch (high token volume) and llama for single calls
-GROQ_MODEL_BATCH  = "gemma2-9b-it"          # 15,000 TPM — best for large batch calls
-GROQ_MODEL_SINGLE = "llama-3.1-8b-instant"  # 14,400 RPD — best for single calls
+# gemma2-9b-it was deprecated Aug 2025 — use llama-3.1-8b-instant instead
+# llama-3.1-8b-instant: 14,400 RPD (most generous daily quota on free tier)
+# llama-3.3-70b-versatile: best quality, 6K TPM limit
+# Use 8b-instant for everything to maximise daily quota
+GROQ_MODEL_BATCH  = "llama-3.1-8b-instant"  # 14,400 RPD — high volume batch
+GROQ_MODEL_SINGLE = "llama-3.1-8b-instant"  # same model for consistency
 
 # Groq rate limit tracking (read from response headers)
 _groq_tokens_remaining = 15000
@@ -533,14 +535,33 @@ def generate_all_formats_batch(
         except Exception as e:
             logger.warning(f"    ✗ poll [{i+1}]: {e}")
 
-    # ── Conspiracy angles ─────────────────────────────────────────
-    logger.info("[BATCH] 🕵️  Conspiracy angles pass...")
-    conspiracies = _batch_generate(BATCH_CONSPIRACY, items, trending, None)
-    for i, r in enumerate(conspiracies):
-        if isinstance(r, dict):
-            results[i]["mainstream"]  = r.get("mainstream")
-            results[i]["alternative"] = r.get("alternative")
-            results[i]["cui_bono"]    = r.get("cui_bono")
+    # ── Conspiracy angles — lightweight individual ─────────────────
+    # Removed from batch: too heavy for small models, times out
+    # Generate individually with a simplified 3-in-1 prompt
+    logger.info("[BATCH] 🕵️  Conspiracy angles (individual, lightweight)...")
+    for i, item in enumerate(items):
+        try:
+            tone = CATEGORY_TONE.get(item.get("category",""), "")
+            prompt = (
+                f"For this news story, write 3 short tweets (max 220 chars each):\n"
+                f"1. mainstream: the official narrative, neutral tone\n"
+                f"2. alternative: questions the official story leaves open\n"
+                f"3. cui_bono: who benefits from this situation?\n"
+                f"Add 1 hashtag each from: {trending}\n"
+                f"Return ONLY JSON: {{\"mainstream\":\"...\",\"alternative\":\"...\",\"cui_bono\":\"...\"}}\n\n"
+                f"Context: {tone}\n"
+                f"Title: {item.get('original_title','')}\n"
+                f"Summary: {item.get('original_summary','')[:150]}"
+            )
+            raw    = _call_llm(prompt, max_tokens=350)
+            parsed = _parse_json(raw)
+            if isinstance(parsed, dict):
+                results[i]["mainstream"]  = parsed.get("mainstream")
+                results[i]["alternative"] = parsed.get("alternative")
+                results[i]["cui_bono"]    = parsed.get("cui_bono")
+                logger.info(f"    ✓ conspiracy [{i+1}/{len(items)}]")
+        except Exception as e:
+            logger.warning(f"    ✗ conspiracy [{i+1}]: {e}")
 
     logger.info(f"[BATCH] ✅ Done — all formats generated for {n} items.\n")
     return results
