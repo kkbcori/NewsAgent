@@ -22,6 +22,10 @@ on:
         description: 'Skip YouTube videos? (true/false)'
         required: false
         default: 'true'
+      skip_trending:
+        description: 'Skip trending hashtags? (true/false)'
+        required: false
+        default: 'false'
 
 jobs:
   generate:
@@ -37,7 +41,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      # ── 2. Python ──────────────────────────────────────────────────────────
+      # ── 2. Python setup ────────────────────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -53,7 +57,7 @@ jobs:
           curl -fsSL https://ollama.com/install.sh | sh
           echo "Ollama installed"
 
-      # ── 4. Cache the model (avoids re-downloading 2GB every run) ──────────
+      # ── 4. Cache Ollama model (avoids 2GB download every run) ─────────────
       - name: Cache Ollama model
         uses: actions/cache@v4
         id: model-cache
@@ -61,44 +65,48 @@ jobs:
           path: ~/.ollama/models
           key: ollama-qwen2.5-3b-v1
 
-      # ── 5. Pull model (skipped if cache hit) ──────────────────────────────
-      - name: Pull Ollama model
+      # ── 5. Start Ollama and pull model ─────────────────────────────────────
+      - name: Start Ollama and pull model
         run: |
           ollama serve &
-          sleep 5
+          sleep 8
           if [ "${{ steps.model-cache.outputs.cache-hit }}" != "true" ]; then
-            echo "Downloading qwen2.5:3b model (~2GB, one-time)..."
+            echo "Downloading qwen2.5:3b model (~2GB, cached after this)..."
             ollama pull qwen2.5:3b
           else
-            echo "Model loaded from cache."
+            echo "Model loaded from cache — skipping download."
             ollama pull qwen2.5:3b 2>/dev/null || true
           fi
-          echo "Model ready."
+          # Verify model is ready
+          ollama list
+          echo "Ollama ready."
         env:
           OLLAMA_MODELS: ~/.ollama/models
 
       # ── 6. Run NewsAgent ───────────────────────────────────────────────────
       - name: Run NewsAgent
         env:
-          GROQ_API_KEY:    ${{ secrets.GROQ_API_KEY }}    # fallback if Ollama fails
-          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }} # optional
+          GROQ_API_KEY:    ${{ secrets.GROQ_API_KEY }}     # fallback if Ollama fails
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}  # optional
           OLLAMA_URL:      "http://localhost:11434"
           OLLAMA_MODEL:    "qwen2.5:3b"
         run: |
-          MAX="${{ github.event.inputs.max_items   || '3' }}"
-          CAT="${{ github.event.inputs.category    || '' }}"
+          MAX="${{ github.event.inputs.max_items    || '3' }}"
+          CAT="${{ github.event.inputs.category     || '' }}"
           SKIP_H="${{ github.event.inputs.skip_hypocrisy || 'false' }}"
           SKIP_Y="${{ github.event.inputs.skip_youtube   || 'true' }}"
+          SKIP_T="${{ github.event.inputs.skip_trending  || 'false' }}"
 
           CMD="python run.py --no-browser --max $MAX"
           [ -n "$CAT"          ] && CMD="$CMD --category $CAT"
           [ "$SKIP_H" = "true" ] && CMD="$CMD --skip-hypocrisy"
           [ "$SKIP_Y" = "true" ] && CMD="$CMD --skip-youtube"
+          [ "$SKIP_T" = "true" ] && CMD="$CMD --skip-trending"
 
           echo "Running: $CMD"
           $CMD
 
-      # ── 7. Commit viewer to repo ───────────────────────────────────────────
+      # ── 7. Commit viewer ───────────────────────────────────────────────────
       - name: Commit & push viewer
         run: |
           git config user.name  "NewsAgent Bot"
