@@ -252,19 +252,34 @@ header{border-bottom:1px solid var(--border);background:var(--surface);padding:0
     parts.append("</div>")
 
     # Data
-    # Use textarea — hidden but innerText/value works reliably unlike display:none divs
-    parts.append(f"<textarea id='d-news' style='position:absolute;left:-9999px;width:1px;height:1px;opacity:0'>{_safe_json(items)}</textarea>")
-    parts.append(f"<textarea id='d-hype' style='position:absolute;left:-9999px;width:1px;height:1px;opacity:0'>{_safe_json(hypocrisy)}</textarea>")
-    parts.append(f"<textarea id='d-vids' style='position:absolute;left:-9999px;width:1px;height:1px;opacity:0'>{_safe_json(videos)}</textarea>")
-    parts.append(f"<textarea id='d-brain' style='position:absolute;left:-9999px;width:1px;height:1px;opacity:0'>{_safe_json(between_lines)}</textarea>")
-    parts.append(f"<textarea id='d-inv' style='position:absolute;left:-9999px;width:1px;height:1px;opacity:0'>{_safe_json(inventions)}</textarea>")
+    # Base64 encode all data — 100% injection-proof regardless of content
+    import base64
+    def b64(data):
+        return base64.b64encode(
+            json.dumps(data, ensure_ascii=True).encode()
+        ).decode()
+
+    parts.append(f"<script id='d-news'  type='text/plain'>{b64(items)}</script>")
+    parts.append(f"<script id='d-hype'  type='text/plain'>{b64(hypocrisy)}</script>")
+    parts.append(f"<script id='d-vids'  type='text/plain'>{b64(videos)}</script>")
+    parts.append(f"<script id='d-brain' type='text/plain'>{b64(between_lines)}</script>")
+    parts.append(f"<script id='d-inv'   type='text/plain'>{b64(inventions)}</script>")
 
     js = """
-var NEWS  = JSON.parse(document.getElementById('d-news').value);
-var HYPE  = JSON.parse(document.getElementById('d-hype').value);
-var VIDS  = JSON.parse(document.getElementById('d-vids').value);
-var BRAIN = JSON.parse(document.getElementById('d-brain').value);
-var INV   = JSON.parse(document.getElementById('d-inv').value);
+function b64decode(id) {
+  try {
+    var b64 = document.getElementById(id).textContent.trim();
+    return JSON.parse(atob(b64));
+  } catch(e) {
+    console.error('Failed to decode ' + id + ':', e);
+    return [];
+  }
+}
+var NEWS  = b64decode('d-news');
+var HYPE  = b64decode('d-hype');
+var VIDS  = b64decode('d-vids');
+var BRAIN = b64decode('d-brain');
+var INV   = b64decode('d-inv');
 
 var activeCat='usa', activeFmt='all', searchQ='';
 
