@@ -218,7 +218,7 @@ def _call_ollama(prompt: str, max_tokens: int = 4000) -> str:
                 {"role": "user",   "content": prompt},
             ],
         },
-        timeout=300,  # 5 min timeout for batch calls
+        timeout=90,  # 90 second hard timeout — prevents infinite hangs
     )
     resp.raise_for_status()
     return resp.json()["message"]["content"].strip()
@@ -488,19 +488,50 @@ def generate_all_formats_batch(
         if isinstance(r, str) and r.strip():
             results[i]["deep_read"] = r.strip().strip('"').strip("'")
 
+
     # ── Thread ────────────────────────────────────────────────────
-    logger.info("[BATCH] 🧵 Thread pass...")
-    threads = _batch_generate(BATCH_THREAD, items, trending, None)
-    for i, r in enumerate(threads):
-        if isinstance(r, list) and r:
-            results[i]["thread"] = [str(t) for t in r]
+    # Small models fail on batched nested JSON — generate individually
+    logger.info("[BATCH] 🧵 Thread pass (individual)...")
+    for i, item in enumerate(items):
+        try:
+            tone   = CATEGORY_TONE.get(item.get("category",""), "")
+            prompt = (
+                f"Write a 3-tweet thread. Context: {tone}\n"
+                f"Tweet 1: hook + 1 hashtag from: {trending}\n"
+                f"Tweet 2: key fact. Tweet 3: question.\n"
+                f"Max 260 chars each.\n"
+                f"Return ONLY JSON array: [\"t1\",\"t2\",\"t3\"]\n\n"
+                f"Title: {item.get('original_title','')}\n"
+                f"Summary: {item.get('original_summary','')[:200]}"
+            )
+            raw    = _call_llm(prompt, max_tokens=350)
+            parsed = _parse_json(raw)
+            if isinstance(parsed, list) and parsed:
+                results[i]["thread"] = [str(t) for t in parsed[:5]]
+                logger.info(f"    ✓ thread [{i+1}/{len(items)}]")
+        except Exception as e:
+            logger.warning(f"    ✗ thread [{i+1}]: {e}")
 
     # ── Poll ──────────────────────────────────────────────────────
-    logger.info("[BATCH] 📊 Poll pass...")
-    polls = _batch_generate(BATCH_POLL, items, trending, None)
-    for i, r in enumerate(polls):
-        if isinstance(r, dict) and "tweet" in r and len(r.get("options", [])) == 4:
-            results[i]["poll"] = r
+    logger.info("[BATCH] 📊 Poll pass (individual)...")
+    for i, item in enumerate(items):
+        try:
+            tone   = CATEGORY_TONE.get(item.get("category",""), "")
+            prompt = (
+                f"Write tweet + poll. Context: {tone}\n"
+                f"Tweet: max 200 chars, ends with question, 1 hashtag from: {trending}\n"
+                f"4 options max 25 chars each.\n"
+                f"Return ONLY JSON: {{\"tweet\":\"...\",\"options\":[\"A\",\"B\",\"C\",\"D\"]}}\n\n"
+                f"Title: {item.get('original_title','')}\n"
+                f"Summary: {item.get('original_summary','')[:200]}"
+            )
+            raw    = _call_llm(prompt, max_tokens=250)
+            parsed = _parse_json(raw)
+            if isinstance(parsed, dict) and "tweet" in parsed and len(parsed.get("options",[])) == 4:
+                results[i]["poll"] = parsed
+                logger.info(f"    ✓ poll [{i+1}/{len(items)}]")
+        except Exception as e:
+            logger.warning(f"    ✗ poll [{i+1}]: {e}")
 
     # ── Conspiracy angles ─────────────────────────────────────────
     logger.info("[BATCH] 🕵️  Conspiracy angles pass...")
