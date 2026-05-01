@@ -301,15 +301,74 @@ def _call_llm(prompt: str, max_tokens: int = 4000, batch: bool = False) -> str:
         raise RuntimeError(f"No LLM available: {e}")
 
 
-def _parse_json(raw: str):
+def _strip_fences(raw: str) -> str:
+    """Strip markdown code fences from LLM output."""
     raw = raw.strip()
     if raw.startswith("```"):
         lines = raw.split("\n")
-        raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        # Remove first line (```json or ```) and last line (```)
+        inner = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+        raw = "\n".join(inner)
     raw = raw.strip()
     if raw.lower().startswith("json"):
         raw = raw[4:].strip()
-    return json.loads(raw)
+    return raw
+
+
+def _extract_json(raw: str):
+    """
+    Try to extract valid JSON from LLM output even if it's malformed.
+    Strategy:
+      1. Normal parse
+      2. Find first [ or { and last ] or } and parse that substring
+      3. Remove trailing commas (common LLM mistake)
+    """
+    import re as _re
+
+    raw = _strip_fences(raw)
+
+    # Try 1: direct parse
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # Try 2: extract outermost array or object
+    for start_char, end_char in [('[', ']'), ('{', '}')]:
+        start = raw.find(start_char)
+        end   = raw.rfind(end_char)
+        if start != -1 and end != -1 and end > start:
+            candidate = raw[start:end+1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+
+    # Try 3: remove trailing commas before ] or }
+    cleaned = _re.sub(r',\s*([\]\}])', r'\1', raw)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Try 4: remove trailing commas AND fix unescaped quotes inside strings
+    # Replace \" that aren't already escaped
+    try:
+        # Find array/object and try aggressive cleanup
+        start = cleaned.find('[') if '[' in cleaned else cleaned.find('{')
+        end   = cleaned.rfind(']') if ']' in cleaned else cleaned.rfind('}')
+        if start != -1 and end != -1:
+            chunk = cleaned[start:end+1]
+            chunk = _re.sub(r',\s*([\]\}])', r'\1', chunk)
+            return json.loads(chunk)
+    except Exception:
+        pass
+
+    raise json.JSONDecodeError("Could not extract valid JSON", raw, 0)
+
+
+def _parse_json(raw: str):
+    return _extract_json(raw)
 
 
 def _fmt_trending(tags: list) -> str:
@@ -349,26 +408,42 @@ def _safe_list(result, expected_count: int, fallback=None) -> list:
 BATCH_SIZE = 20
 
 
+RETRY_PREFIX = "Your previous response had invalid JSON. Return ONLY a valid JSON array, no prose, no markdown. Fix any unescaped quotes inside strings.\n\n"
+
+
 def _batch_generate(prompt_template: str, items: list[dict],
                     trending: str, fallback=None) -> list:
-    """Run a batch prompt and return per-item results."""
+    """Run a batch prompt and return per-item results. Retries once on JSON failure."""
     results = []
     for start in range(0, len(items), BATCH_SIZE):
         chunk = items[start:start + BATCH_SIZE]
         prompt = prompt_template.format(
-            count   = len(chunk),
-            trending= trending,
-            items   = _fmt_items(chunk),
+            count    = len(chunk),
+            trending = trending,
+            items    = _fmt_items(chunk),
         )
+        chunk_results = None
+
+        # First attempt
         try:
             raw = _call_llm(prompt, max_tokens=min(4000, len(chunk) * 200), batch=True)
             parsed = _parse_json(raw)
             chunk_results = _safe_list(parsed, len(chunk), fallback)
-            results.extend(chunk_results)
             logger.info(f"    Batch chunk {start//BATCH_SIZE + 1}: {len(chunk_results)} items OK")
         except Exception as e:
-            logger.warning(f"    Batch chunk failed: {e}")
-            results.extend([fallback] * len(chunk))
+            logger.warning(f"    Batch chunk {start//BATCH_SIZE + 1} failed: {e} — retrying...")
+            # Retry with explicit JSON repair instruction
+            try:
+                retry_prompt = RETRY_PREFIX + prompt
+                raw = _call_llm(retry_prompt, max_tokens=min(4000, len(chunk) * 200), batch=True)
+                parsed = _parse_json(raw)
+                chunk_results = _safe_list(parsed, len(chunk), fallback)
+                logger.info(f"    Retry succeeded: {len(chunk_results)} items")
+            except Exception as e2:
+                logger.warning(f"    Retry also failed: {e2} — using fallback")
+                chunk_results = [fallback] * len(chunk)
+
+        results.extend(chunk_results)
     return results
 
 
@@ -510,16 +585,19 @@ def generate_between_lines(
         for i in all_items
     )
     trending = _fmt_trending(trending_tags or [])
-    try:
-        raw     = _call_llm(BETWEEN_LINES_PROMPT.format(
-            headlines=headlines[:12000], trending=trending
-        ), max_tokens=3000)
-        results = _parse_json(raw)
-        if isinstance(results, list):
-            logger.info(f"[BRAIN] {len(results)} observations.")
-            return results
-    except Exception as e:
-        logger.warning(f"[BRAIN] Failed: {e}")
+    prompt   = BETWEEN_LINES_PROMPT.format(
+        headlines=headlines[:12000], trending=trending
+    )
+    for attempt in range(2):
+        try:
+            pfx = RETRY_PREFIX if attempt > 0 else ""
+            raw     = _call_llm(pfx + prompt, max_tokens=3000, batch=True)
+            results = _parse_json(raw)
+            if isinstance(results, list):
+                logger.info(f"[BRAIN] {len(results)} observations.")
+                return results
+        except Exception as e:
+            logger.warning(f"[BRAIN] Attempt {attempt+1} failed: {e}")
     return []
 
 
@@ -534,16 +612,19 @@ def generate_hypocrisy_tweets(
         for i in all_items
     )
     trending = _fmt_trending(trending_tags or [])
-    try:
-        raw     = _call_llm(HYPOCRISY_PROMPT.format(
-            headlines=headlines[:10000], trending=trending
-        ), max_tokens=2000)
-        results = _parse_json(raw)
-        if isinstance(results, list):
-            logger.info(f"[HYPOCRISY] {len(results)} tweets.")
-            return results
-    except Exception as e:
-        logger.warning(f"[HYPOCRISY] Failed: {e}")
+    prompt   = HYPOCRISY_PROMPT.format(
+        headlines=headlines[:10000], trending=trending
+    )
+    for attempt in range(2):
+        try:
+            pfx = RETRY_PREFIX if attempt > 0 else ""
+            raw     = _call_llm(pfx + prompt, max_tokens=2000, batch=True)
+            results = _parse_json(raw)
+            if isinstance(results, list):
+                logger.info(f"[HYPOCRISY] {len(results)} tweets.")
+                return results
+        except Exception as e:
+            logger.warning(f"[HYPOCRISY] Attempt {attempt+1} failed: {e}")
     return []
 
 

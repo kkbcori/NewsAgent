@@ -252,18 +252,19 @@ header{border-bottom:1px solid var(--border);background:var(--surface);padding:0
     parts.append("</div>")
 
     # Data
-    parts.append(f"<div id='d-news' style='display:none'>{_safe_json(items)}</div>")
-    parts.append(f"<div id='d-hype' style='display:none'>{_safe_json(hypocrisy)}</div>")
-    parts.append(f"<div id='d-vids' style='display:none'>{_safe_json(videos)}</div>")
-    parts.append(f"<div id='d-brain' style='display:none'>{_safe_json(between_lines)}</div>")
-    parts.append(f"<div id='d-inv' style='display:none'>{_safe_json(inventions)}</div>")
+    # Use textarea — hidden but innerText/value works reliably unlike display:none divs
+    parts.append(f"<textarea id='d-news' style='position:absolute;left:-9999px;width:1px;height:1px;opacity:0'>{_safe_json(items)}</textarea>")
+    parts.append(f"<textarea id='d-hype' style='position:absolute;left:-9999px;width:1px;height:1px;opacity:0'>{_safe_json(hypocrisy)}</textarea>")
+    parts.append(f"<textarea id='d-vids' style='position:absolute;left:-9999px;width:1px;height:1px;opacity:0'>{_safe_json(videos)}</textarea>")
+    parts.append(f"<textarea id='d-brain' style='position:absolute;left:-9999px;width:1px;height:1px;opacity:0'>{_safe_json(between_lines)}</textarea>")
+    parts.append(f"<textarea id='d-inv' style='position:absolute;left:-9999px;width:1px;height:1px;opacity:0'>{_safe_json(inventions)}</textarea>")
 
     js = """
-var NEWS  = JSON.parse(document.getElementById('d-news').innerText);
-var HYPE  = JSON.parse(document.getElementById('d-hype').innerText);
-var VIDS  = JSON.parse(document.getElementById('d-vids').innerText);
-var BRAIN = JSON.parse(document.getElementById('d-brain').innerText);
-var INV   = JSON.parse(document.getElementById('d-inv').innerText);
+var NEWS  = JSON.parse(document.getElementById('d-news').value);
+var HYPE  = JSON.parse(document.getElementById('d-hype').value);
+var VIDS  = JSON.parse(document.getElementById('d-vids').value);
+var BRAIN = JSON.parse(document.getElementById('d-brain').value);
+var INV   = JSON.parse(document.getElementById('d-inv').value);
 
 var activeCat='usa', activeFmt='all', searchQ='';
 
