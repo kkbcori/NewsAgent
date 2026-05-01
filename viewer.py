@@ -452,28 +452,33 @@ function loadData(){
 loadData();
 """
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>NewsAgent &middot; {date_str}</title>
-<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet"/>
-<style>{CSS}</style>
-</head>
-<body>
-<header>
-  <div class="logo">News<span>Agent</span></div>
-  <div class="hdate">{date_str}</div>
-  <div class="hstats">
-    <div class="hstat">&#128240; <b>{total_news}</b> news</div>
-    <div class="hstat">&#128249; <b>{total_vids}</b> videos</div>
-    <div class="hstat">&#127917; <b>{total_hype}</b> hypocrisy</div>
-    <div class="hstat">&#129504; <b>{total_brain}</b> brain</div>
-    <div class="hstat">&#128300; <b>{total_inv}</b> inventions</div>
-  </div>
-</header>
-<div class="shell">
+    # Build HTML using concatenation — NOT f-string
+    # f-strings corrupt JS because {var} in JS gets interpreted as Python placeholders
+    head = (
+        '<!DOCTYPE html>\n<html lang="en">\n<head>\n'
+        '<meta charset="UTF-8"/>\n'
+        '<meta name="viewport" content="width=device-width,initial-scale=1.0"/>\n'
+        '<title>NewsAgent &middot; ' + date_str + '</title>\n'
+        '<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900'
+        '&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600'
+        '&display=swap" rel="stylesheet"/>\n'
+        '<style>' + CSS + '</style>\n</head>\n<body>\n'
+    )
+
+    header = (
+        '<header>\n'
+        '  <div class="logo">News<span>Agent</span></div>\n'
+        '  <div class="hdate">' + date_str + '</div>\n'
+        '  <div class="hstats">\n'
+        '    <div class="hstat">&#128240; <b>' + str(total_news)  + '</b> news</div>\n'
+        '    <div class="hstat">&#128249; <b>' + str(total_vids)  + '</b> videos</div>\n'
+        '    <div class="hstat">&#127917; <b>' + str(total_hype)  + '</b> hypocrisy</div>\n'
+        '    <div class="hstat">&#129504; <b>' + str(total_brain) + '</b> brain</div>\n'
+        '    <div class="hstat">&#128300; <b>' + str(total_inv)   + '</b> inventions</div>\n'
+        '  </div>\n</header>\n'
+    )
+
+    body = """<div class="shell">
   <nav class="sidenav">
     <div class="nav-lbl">News</div>
     <button class="nav-btn n-usa active" onclick="showCat('usa',this)">&#127482;&#127480; USA <span class="nav-cnt" id="nc-usa">0</span></button>
@@ -514,6 +519,6 @@ loadData();
     <div id="sec-inv"    class="cat-sec sec-inv"    style="display:none"></div>
   </main>
 </div>
-<script>{JS}</script>
-</body>
-</html>"""
+"""
+
+    return head + header + body + '<script>\n' + JS + '\n</script>\n</body>\n</html>'
